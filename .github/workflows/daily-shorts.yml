@@ -1,0 +1,88 @@
+name: Daily 10 GTA 6 Shorts
+
+on:
+  schedule:
+    # 5 runs/day x 2 Shorts/run = 10 Shorts/day (spread across NA, EU, and OCE/Asia peak streams)
+    - cron: "0 2,7,12,17,22 * * *"
+  workflow_dispatch:
+    inputs:
+      target_clips:
+        description: "Number of Shorts to generate in this run"
+        required: false
+        default: "2"
+      minutes:
+        description: "Minutes to record per live stream"
+        required: false
+        default: "4"
+      platform:
+        description: "Stream platform (both, twitch, youtube)"
+        required: false
+        default: "both"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-shorts
+  cancel-in-progress: false
+
+jobs:
+  clip-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system tools (ffmpeg, rclone)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg rclone
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure rclone for Google Drive (if RCLONE_CONF secret is set)
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          if [ -n "$RCLONE_CONF" ]; then
+            mkdir -p ~/.config/rclone
+            printf '%s\n' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+            echo "rclone configured for Google Drive upload."
+          else
+            echo "RCLONE_CONF secret not set; clips will be saved as GitHub Actions artifacts only."
+          fi
+
+      - name: Run autopilot to capture live streams and cut Shorts
+        env:
+          GDRIVE_FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID || '1_E_al6Tmn1UKkwpyrI4pxWHM8PL0_3dk' }}
+        run: |
+          TARGET="${{ github.event.inputs.target_clips || '2' }}"
+          MINS="${{ github.event.inputs.minutes || '4' }}"
+          PLAT="${{ github.event.inputs.platform || 'both' }}"
+          python scripts/autopilot.py \
+            --platform "$PLAT" \
+            --target-clips "$TARGET" \
+            --minutes "$MINS" \
+            --max-clips 2 \
+            --drive-folder-id "$GDRIVE_FOLDER_ID" \
+            --cleanup
+
+      - name: Upload ready Shorts as workflow artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gta6-shorts-${{ github.run_number }}
+          path: ready_shorts/
+          retention-days: 7
+          if-no-files-found: ignore

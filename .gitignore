@@ -6,3 +6,6 @@ test/
 *.wav
 *.ts
 !docs/*.mp4
+ready_shorts/
+autopilot_state.json
+
