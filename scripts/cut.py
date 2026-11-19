@@ -100,7 +100,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 CAP_Y = {"fill": 1380, "blur": 1460, "facecam": 1120, "react": 1560}
-TOP = int(H * 0.38)  # react layout: facecam height
+TOP = int(H * 0.38) & ~1  # react/facecam height (even for yuv420p so vstack is exact 1080x1920)
 
 
 def video_filter(layout, cam, ass, band=None, cam_side='right'):
@@ -121,8 +121,8 @@ def video_filter(layout, cam, ass, band=None, cam_side='right'):
             v = v[:-3] + f"[v0];[v0]drawbox=x=0:y={y0}:w=iw:h={bh}:color=white@1:t=fill{en}[v]"
     else:
         x, y, w, h = map(float, cam.split(":"))
-        v = (f"[0:v]split[a][b];[a]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale={W}:{int(H * 0.38)}:force_original_aspect_ratio=increase,"
-             f"crop={W}:{int(H * 0.38)}[cam];[b]scale=-2:{H - int(H * 0.38)},crop={W}:{H - int(H * 0.38)}[game];[cam][game]vstack[v]")
+        v = (f"[0:v]split[a][b];[a]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale={W}:{TOP}:force_original_aspect_ratio=increase,"
+             f"crop={W}:{TOP}[cam];[b]scale=-2:{H - TOP},crop={W}:{H - TOP}[game];[cam][game]vstack[v]")
     sub = str(ass).replace("\\", "/").replace(":", "\\:")
     return v + f";[v]fps=30,subtitles='{sub}'[vo]"
 
