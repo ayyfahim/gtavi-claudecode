@@ -112,9 +112,8 @@ def video_filter(layout, cam, ass, band=None, cam_side='right'):
              f"[b]scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2-80[v]")
     elif layout == 'react':
         x, y, w, h = map(float, cam.split(':'))
-        gx = 'iw-ow' if cam_side == 'left' else '0'  # crop the gameplay away from the webcam corner
         v = (f"[0:v]split[a][b];[a]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale={W}:{TOP}:force_original_aspect_ratio=increase,"
-             f"crop={W}:{TOP}[cam];[b]scale=-2:{H - TOP},crop={W}:{H - TOP}:{gx}:0[game];[cam][game]vstack[v]")
+             f"crop={W}:{TOP}[cam];[b]scale=-2:{H - TOP},crop={W}:{H - TOP}:(iw-ow)/2:0[game];[cam][game]vstack[v]")
         if band:
             y0, bh, secs = band
             en = f":enable='lte(t,{secs})'" if secs > 0 else ''
