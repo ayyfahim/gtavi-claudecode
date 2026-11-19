@@ -83,7 +83,7 @@ def detect_upload_backend(requested):
         return "none"
     if requested in ("auto", "gdrive") and shutil.which("gdrive"):
         r = run([shutil.which("gdrive"), "auth", "status"], capture=True, check=False, timeout=20)
-        if r.returncode == 0 and "Logged in" in (r.stdout or ""):
+        if r.returncode == 0 and "Logged in" in ((r.stdout or "") + "\n" + (r.stderr or "")):
             return "gdrive"
         if requested == "gdrive":
             sys.exit("gdrive CLI is not logged in.")
