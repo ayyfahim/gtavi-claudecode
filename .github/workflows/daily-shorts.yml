@@ -75,6 +75,7 @@ jobs:
             --target-clips "$TARGET" \
             --minutes "$MINS" \
             --max-clips 2 \
+            --max-runtime-mins 35 \
             --drive-folder-id "$GDRIVE_FOLDER_ID" \
             --cleanup
 

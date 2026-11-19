@@ -13,9 +13,15 @@ def tool(name):
     return p
 
 
-def run(cmd, check=True, capture=False):
-    r = subprocess.run(cmd, check=False, text=True, encoding="utf-8", errors="replace",
-                       stdout=subprocess.PIPE if capture else None, stderr=subprocess.PIPE if capture else None)
+def run(cmd, check=True, capture=False, timeout=None):
+    try:
+        r = subprocess.run(cmd, check=False, text=True, encoding="utf-8", errors="replace",
+                           stdout=subprocess.PIPE if capture else None, stderr=subprocess.PIPE if capture else None,
+                           timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode("utf-8", "replace") if e.stdout else "")
+        err = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode("utf-8", "replace") if e.stderr else "")
+        r = subprocess.CompletedProcess(cmd, 124, out, (err + f"\n[timeout after {timeout}s]").strip())
     if check and r.returncode != 0:
         msg = (r.stderr or "")[-1500:] if capture else ""
         sys.exit(f"command failed ({r.returncode}): {' '.join(map(str, cmd))[:200]}\n{msg}")

@@ -60,17 +60,35 @@ def slugify(text):
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", (text or "clip")).strip("_")[:40] or "clip"
 
 
+def _extract_id(obj):
+    if isinstance(obj, dict):
+        for k in ("id", "Id", "fileId", "file_id"):
+            v = obj.get(k)
+            if isinstance(v, str) and len(v) >= 10:
+                return v
+        for v in obj.values():
+            found = _extract_id(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _extract_id(item)
+            if found:
+                return found
+    return ""
+
+
 def detect_upload_backend(requested):
     if requested == "none":
         return "none"
     if requested in ("auto", "gdrive") and shutil.which("gdrive"):
-        r = run([shutil.which("gdrive"), "auth", "status"], capture=True, check=False)
+        r = run([shutil.which("gdrive"), "auth", "status"], capture=True, check=False, timeout=20)
         if r.returncode == 0 and "Logged in" in (r.stdout or ""):
             return "gdrive"
         if requested == "gdrive":
             sys.exit("gdrive CLI is not logged in.")
     if requested in ("auto", "rclone") and shutil.which("rclone"):
-        r = run([shutil.which("rclone"), "listremotes"], capture=True, check=False)
+        r = run([shutil.which("rclone"), "listremotes"], capture=True, check=False, timeout=20)
         remotes = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
         if "gdrive:" in remotes:
             return "rclone"
@@ -90,25 +108,22 @@ def resolve_drive_folder(folder_name, folder_id_arg, state, backend):
         return state["drive_folder_id"]
     gdrive = tool("gdrive")
     r = run([gdrive, "readonly", "search", "--name-exact", folder_name, "--type", "folder", "--json"],
-            capture=True, check=False)
+            capture=True, check=False, timeout=30)
     if r.returncode == 0 and r.stdout.strip():
         try:
-            items = json.loads(r.stdout)
-            if isinstance(items, list) and items:
-                fid = items[0].get("id") or items[0].get("Id")
-                if fid:
-                    state["drive_folder_id"] = fid
-                    save_state(state)
-                    return fid
+            fid = _extract_id(json.loads(r.stdout))
+            if fid:
+                state["drive_folder_id"] = fid
+                save_state(state)
+                return fid
         except Exception:
             pass
-    r = run([gdrive, "mutate", "mkdir", folder_name, "--json"], capture=True)
+    r = run([gdrive, "mutate", "mkdir", folder_name, "--json"], capture=True, timeout=30)
     m = re.search(r"ID:\s*([A-Za-z0-9_-]+)", r.stdout)
     if m:
         fid = m.group(1)
     else:
-        data = json.loads(r.stdout)
-        fid = data.get("id") or data.get("Id")
+        fid = _extract_id(json.loads(r.stdout))
     state["drive_folder_id"] = fid
     save_state(state)
     return fid
@@ -117,21 +132,35 @@ def resolve_drive_folder(folder_name, folder_id_arg, state, backend):
 def upload_to_drive(local_path, folder_id, backend):
     if backend == "gdrive":
         gdrive = tool("gdrive")
-        r = run([gdrive, "mutate", "upload", str(local_path), "--parent", folder_id, "--json"], capture=True)
-        out = (r.stdout or "").strip()
-        fid = ""
-        try:
-            data = json.loads(out)
-            fid = data.get("id") or data.get("Id") or ""
-        except Exception:
-            m = re.search(r"(?:ID:|id[\"']?\s*:\s*[\"']?)([A-Za-z0-9_-]{15,})", out + "\n" + (r.stderr or ""))
-            fid = m.group(1) if m else ""
-        url = f"https://drive.google.com/file/d/{fid}/view" if fid else ""
-        return fid, url, out
+        last_err = ""
+        for attempt in range(2):
+            r = run([gdrive, "mutate", "upload", str(local_path), "--parent", folder_id, "--json"],
+                    capture=True, check=False, timeout=180)
+            if r.returncode == 0:
+                out = (r.stdout or "").strip()
+                fid = ""
+                try:
+                    fid = _extract_id(json.loads(out))
+                except Exception:
+                    pass
+                if not fid:
+                    m = re.search(r"(?:ID:|id[\"']?\s*:\s*[\"']?)([A-Za-z0-9_-]{15,})", out + "\n" + (r.stderr or ""))
+                    fid = m.group(1) if m else ""
+                url = f"https://drive.google.com/file/d/{fid}/view" if fid else ""
+                return fid, url, out
+            last_err = (r.stderr or r.stdout or "").strip()[-300:]
+            if attempt == 0:
+                print(f"[warn] gdrive upload failed ({r.returncode}), retrying: {last_err}")
+                time.sleep(3)
+        print(f"[warn] gdrive upload failed for {local_path.name}: {last_err}")
+        return "", "", last_err
     if backend == "rclone":
         rclone = tool("rclone")
         cmd = [rclone, "copy", str(local_path), "gdrive:", "--drive-root-folder-id", folder_id]
-        r = run(cmd, capture=True)
+        r = run(cmd, capture=True, check=False, timeout=180)
+        if r.returncode != 0:
+            print(f"[warn] rclone upload failed ({r.returncode}) for {local_path.name}")
+            return "", "", (r.stderr or "").strip()
         return "", f"https://drive.google.com/drive/folders/{folder_id}", (r.stdout or "").strip()
     return "", "", ""
 
@@ -161,7 +190,7 @@ def concat_segments(live_dir, out_mp4):
     lst = live_dir / "concat_all.txt"
     lst.write_text("".join(f"file '{s.resolve().as_posix()}'\n" for s in segs), encoding="utf-8")
     r = run([tool("ffmpeg"), "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(lst),
-             "-c", "copy", "-movflags", "+faststart", str(out_mp4)], check=False, capture=True)
+             "-c", "copy", "-movflags", "+faststart", str(out_mp4)], check=False, capture=True, timeout=120)
     lst.unlink(missing_ok=True)
     if r.returncode == 0 and out_mp4.exists() and out_mp4.stat().st_size > 0:
         return out_mp4
@@ -200,13 +229,20 @@ def build_shorts_metadata(title, channel, source_url, cand):
     )
 
 
-def process_video_source(video_path, channel, source_url, args, folder_id, backend, state):
+def _deadline_reached(deadline, margin_s=0):
+    return deadline is not None and time.monotonic() + margin_s >= deadline
+
+
+def process_video_source(video_path, channel, source_url, args, folder_id, backend, state, deadline=None):
+    if _deadline_reached(deadline, margin_s=30):
+        print("[budget] max runtime reached before analysis; stopping cleanly.")
+        return []
     print(f"[moments] analyzing {video_path} ...")
     r = run([py(), str(SCRIPTS / "moments.py"), str(video_path),
              "--top", str(max(args.max_clips * 2, 4)),
-             "--min", str(args.min_secs), "--max", str(args.max_secs)], check=False)
+             "--min", str(args.min_secs), "--max", str(args.max_secs)], check=False, timeout=300)
     if r.returncode != 0:
-        print(f"[warn] moments.py failed on {video_path}")
+        print(f"[warn] moments.py failed ({r.returncode}) on {video_path}")
         return []
     jd = job_dir(str(video_path))
     cands_file = jd / "candidates.json"
@@ -226,6 +262,9 @@ def process_video_source(video_path, channel, source_url, args, folder_id, backe
     for cand in cands:
         if len(uploaded) >= args.max_clips:
             break
+        if _deadline_reached(deadline, margin_s=30):
+            print("[budget] max runtime reached before cutting next clip; stopping cleanly.")
+            break
         n = cand["n"]
         title = sanitize(make_title(channel, cand.get("text", "")))
         cut_cmd = [
@@ -241,16 +280,17 @@ def process_video_source(video_path, channel, source_url, args, folder_id, backe
         else:
             cut_cmd += ["--hook", title]
         print(f"[cut] cutting candidate #{n} ({cand['start']}s-{cand['end']}s, score={cand['score']}) ...")
-        rc = run(cut_cmd, check=False)
+        rc = run(cut_cmd, check=False, timeout=240)
         if rc.returncode != 0:
-            print(f"[warn] cut.py failed on candidate #{n}")
+            print(f"[warn] cut.py failed ({rc.returncode}) on candidate #{n}")
             continue
 
         clip_mp4 = jd / "edits" / f"clip_{n}.mp4"
         if not clip_mp4.exists():
             continue
 
-        chk = run([py(), str(SCRIPTS / "check.py"), str(clip_mp4), "--caption", title], check=False, capture=True)
+        chk = run([py(), str(SCRIPTS / "check.py"), str(clip_mp4), "--caption", title],
+                  check=False, capture=True, timeout=60)
         print(chk.stdout.strip())
         if chk.returncode != 0:
             print(f"[skip] clip_{n}.mp4 failed check.py")
@@ -281,7 +321,7 @@ def process_video_source(video_path, channel, source_url, args, folder_id, backe
             entry["drive_mp4_url"] = url_mp4
             entry["drive_txt_id"] = fid_txt
             entry["drive_txt_url"] = url_txt
-            print(f"[done] uploaded: {final_mp4.name} -> {url_mp4 or fid_mp4}")
+            print(f"[done] uploaded: {final_mp4.name} -> {url_mp4 or fid_mp4 or '(uploaded)'}")
         else:
             print(f"[done] saved locally (no Drive upload backend): {final_mp4}")
 
@@ -294,7 +334,11 @@ def process_video_source(video_path, channel, source_url, args, folder_id, backe
     return uploaded
 
 
-def run_once(args, state, folder_id, backend, skip_channels, max_for_stream):
+def run_once(args, state, folder_id, backend, skip_channels, max_for_stream, deadline=None):
+    if _deadline_reached(deadline, margin_s=int(args.minutes * 60) + 45):
+        print("[budget] not enough runtime left for another stream recording; stopping cleanly.")
+        return []
+
     if args.url:
         url = args.url
         m = re.search(r"twitch\.tv/([A-Za-z0-9_]+)", url)
@@ -309,8 +353,9 @@ def run_once(args, state, folder_id, backend, skip_channels, max_for_stream):
         skip_channels.append(channel)
 
     print(f"[live] recording {url} for {args.minutes:g} min ...")
+    live_timeout = max(120, int(args.minutes * 60) + 120)
     rl = run([py(), str(SCRIPTS / "live.py"), url, "--minutes", str(args.minutes),
-              "--before", "15", "--after", "20"], check=False)
+              "--before", "15", "--after", "20"], check=False, timeout=live_timeout)
     if rl.returncode != 0:
         print(f"[warn] live.py exited with {rl.returncode} for {url}")
 
@@ -335,12 +380,12 @@ def run_once(args, state, folder_id, backend, skip_channels, max_for_stream):
 
     all_uploaded = []
     for src in sources:
-        if len(all_uploaded) >= max_for_stream:
+        if len(all_uploaded) >= max_for_stream or _deadline_reached(deadline, margin_s=30):
             break
         remaining = max_for_stream - len(all_uploaded)
         sub_args = argparse.Namespace(**vars(args))
         sub_args.max_clips = remaining
-        all_uploaded += process_video_source(src, channel, url, sub_args, folder_id, backend, state)
+        all_uploaded += process_video_source(src, channel, url, sub_args, folder_id, backend, state, deadline=deadline)
 
     if args.cleanup:
         shutil.rmtree(stream_job, ignore_errors=True)
@@ -348,6 +393,12 @@ def run_once(args, state, folder_id, backend, skip_channels, max_for_stream):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass
+
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--platform", choices=["twitch", "youtube", "both"], default="both")
     ap.add_argument("--query", default="gta 6")
@@ -358,6 +409,7 @@ def main():
     ap.add_argument("--max-clips", type=int, default=2, help="max YouTube Shorts to cut per stream")
     ap.add_argument("--target-clips", type=int, default=0, help="keep sampling streams until N total Shorts are produced (overrides --loops)")
     ap.add_argument("--max-attempts", type=int, default=10, help="max streams to try when --target-clips is set")
+    ap.add_argument("--max-runtime-mins", type=float, default=0, help="stop cleanly after N wall-clock minutes (0 = unlimited)")
     ap.add_argument("--min-secs", type=float, default=15)
     ap.add_argument("--max-secs", type=float, default=45)
     ap.add_argument("--layout", choices=["react", "blur", "fill", "facecam"], default="react")
@@ -371,6 +423,8 @@ def main():
     ap.add_argument("--loops", type=int, default=1, help="how many stream rounds to run (when --target-clips is 0)")
     ap.add_argument("--sleep", type=float, default=10, help="seconds to wait between streams")
     args = ap.parse_args()
+
+    deadline = (time.monotonic() + args.max_runtime_mins * 60) if args.max_runtime_mins > 0 else None
 
     state = load_state()
     backend = "none" if args.no_upload else detect_upload_backend(args.upload_backend)
@@ -386,17 +440,23 @@ def main():
     if args.target_clips > 0:
         attempt = 0
         while len(total) < args.target_clips and attempt < args.max_attempts:
+            if _deadline_reached(deadline, margin_s=int(args.minutes * 60) + 45):
+                print("[budget] max runtime budget reached; finishing batch.")
+                break
             attempt += 1
             need = min(args.max_clips, args.target_clips - len(total))
             print(f"\n=== TARGET {len(total)}/{args.target_clips} | STREAM ATTEMPT {attempt}/{args.max_attempts} ===")
-            total += run_once(args, state, folder_id, backend, skip_channels, need)
-            if len(total) < args.target_clips and attempt < args.max_attempts:
+            total += run_once(args, state, folder_id, backend, skip_channels, need, deadline=deadline)
+            if len(total) < args.target_clips and attempt < args.max_attempts and not _deadline_reached(deadline, margin_s=60):
                 time.sleep(args.sleep)
     else:
         for i in range(1, args.loops + 1):
+            if _deadline_reached(deadline, margin_s=int(args.minutes * 60) + 45):
+                print("[budget] max runtime budget reached; finishing batch.")
+                break
             print(f"\n=== LOOP {i}/{args.loops} ===")
-            total += run_once(args, state, folder_id, backend, skip_channels, args.max_clips)
-            if i < args.loops:
+            total += run_once(args, state, folder_id, backend, skip_channels, args.max_clips, deadline=deadline)
+            if i < args.loops and not _deadline_reached(deadline, margin_s=60):
                 time.sleep(args.sleep)
 
     print(f"\n=== SUMMARY: {len(total)} Short(s) ready ===")
